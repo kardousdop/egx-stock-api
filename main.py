@@ -4,6 +4,7 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime
 import numpy as np
+import sys, platform
 
 app = FastAPI(title="EGX Stock API", version="1.0.0")
 
@@ -15,34 +16,26 @@ app.add_middleware(
 )
 
 EGX_MAP = {
-    "COMI": "COMI.CA", "HRHO": "HRHO.CA", "TMGH": "TMGH.CA",
-    "SWDY": "SWDY.CA", "ORWE": "ORWE.CA", "JUFO": "JUFO.CA",
-    "PHDC": "PHDC.CA", "MNHD": "MNHD.CA", "CLHO": "CLHO.CA",
-    "AMOC": "AMOC.CA", "ABUK": "ABUK.CA", "EKHW": "EKHW.CA",
-    "ESRS": "ESRS.CA", "SKPC": "SKPC.CA", "MCIT": "MCIT.CA",
-    "EXPA": "EXPA.CA", "EFIC": "EFIC.CA", "ORAS": "ORAS.CA",
-    "EGAL": "EGAL.CA", "ETEL": "ETEL.CA", "MFPC": "MFPC.CA",
-    "HELI": "HELI.CA", "AIRC": "AIRC.CA", "GBCO": "GBCO.CA",
+    "COMI":"COMI.CA","HRHO":"HRHO.CA","TMGH":"TMGH.CA","SWDY":"SWDY.CA",
+    "ORWE":"ORWE.CA","JUFO":"JUFO.CA","PHDC":"PHDC.CA","MNHD":"MNHD.CA",
+    "CLHO":"CLHO.CA","AMOC":"AMOC.CA","ABUK":"ABUK.CA","EKHW":"EKHW.CA",
+    "ESRS":"ESRS.CA","SKPC":"SKPC.CA","EFIC":"EFIC.CA","ORAS":"ORAS.CA",
+    "EGAL":"EGAL.CA","ETEL":"ETEL.CA","HELI":"HELI.CA","AIRC":"AIRC.CA",
 }
 
 def to_ticker(symbol: str) -> str:
     s = symbol.upper().strip()
-    if s.endswith(".CA"):
-        return s
+    if s.endswith(".CA"): return s
     return EGX_MAP.get(s, s + ".CA")
 
 def safe(val):
-    if val is None or (isinstance(val, float) and np.isnan(val)):
-        return None
-    if isinstance(val, (np.integer,)):
-        return int(val)
-    if isinstance(val, (np.floating,)):
-        return float(val)
+    if val is None or (isinstance(val, float) and np.isnan(val)): return None
+    if isinstance(val, np.integer): return int(val)
+    if isinstance(val, np.floating): return float(val)
     return val
 
 def calc_rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return None
+    if len(closes) < period + 1: return None
     delta = pd.Series(closes).diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
@@ -67,17 +60,49 @@ def calc_bb(closes, period=20):
     s = pd.Series(closes)
     ma = s.rolling(period).mean()
     std = s.rolling(period).std()
-    upper = ma + 2 * std
-    lower = ma - 2 * std
     return {
-        "upper": round(float(upper.iloc[-1]), 2),
+        "upper": round(float((ma + 2*std).iloc[-1]), 2),
         "middle": round(float(ma.iloc[-1]), 2),
-        "lower": round(float(lower.iloc[-1]), 2),
+        "lower": round(float((ma - 2*std).iloc[-1]), 2),
     }
 
 @app.get("/")
 def root():
-    return {"status": "EGX Stock API is live ✅", "version": "1.0.0"}
+    return {"status": "EGX Stock API is live ✅", "version": "2.0.0"}
+
+@app.get("/debug")
+def debug():
+    try:
+        import requests as req
+        r = req.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/COMI.CA?interval=1d&range=5d",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=10
+        )
+        result = r.json().get("chart", {}).get("result") or []
+        yahoo_ok = len(result) > 0
+        yahoo_status = r.status_code
+    except Exception as e:
+        yahoo_ok = False
+        yahoo_status = str(e)
+
+    try:
+        t = yf.Ticker("COMI.CA")
+        h = t.history(period="5d")
+        yf_ok = len(h) > 0
+        yf_rows = len(h)
+    except Exception as e:
+        yf_ok = False
+        yf_rows = str(e)
+
+    return {
+        "python": sys.version[:20],
+        "yfinance_version": yf.__version__,
+        "yahoo_direct_reachable": yahoo_ok,
+        "yahoo_http_status": yahoo_status,
+        "yfinance_test_ok": yf_ok,
+        "yfinance_rows": yf_rows,
+    }
 
 @app.get("/stock/{symbol}")
 def get_stock(symbol: str, period: str = "3mo"):
@@ -90,11 +115,9 @@ def get_stock(symbol: str, period: str = "3mo"):
 
         info = t.info
         fi = t.fast_info
-
         closes = hist["Close"].tolist()
         volumes = hist["Volume"].tolist()
         dates = [str(d.date()) for d in hist.index]
-
         cur = closes[-1]
         prev = closes[-2] if len(closes) > 1 else cur
 
@@ -104,23 +127,13 @@ def get_stock(symbol: str, period: str = "3mo"):
 
         week_chg = round((cur - closes[-6]) / closes[-6] * 100, 2) if len(closes) >= 6 else None
         month_chg = round((cur - closes[-22]) / closes[-22] * 100, 2) if len(closes) >= 22 else None
-        q3_chg = round((cur - closes[-66]) / closes[-66] * 100, 2) if len(closes) >= 66 else None
         ytd_chg = round((cur - closes[0]) / closes[0] * 100, 2)
-
-        rsi = calc_rsi(closes)
-        macd = calc_macd(closes)
-        bb = calc_bb(closes)
-
-        # Support & Resistance (simple)
-        high_20 = round(max(hist["High"].tail(20)), 2)
-        low_20 = round(min(hist["Low"].tail(20)), 2)
 
         return {
             "symbol": symbol.upper(),
             "ticker": ticker_sym,
             "name": info.get("longName") or info.get("shortName") or symbol.upper(),
             "sector": info.get("sector"),
-            "industry": info.get("industry"),
             "currency": info.get("currency", "EGP"),
             "exchange": "EGX",
             "price": {
@@ -133,7 +146,7 @@ def get_stock(symbol: str, period: str = "3mo"):
                 "day_change_pct": round((cur - prev) / prev * 100, 2),
                 "week_change_pct": week_chg,
                 "month_change_pct": month_chg,
-                "three_month_change_pct": q3_chg,
+                "three_month_change_pct": None,
                 "ytd_change_pct": ytd_chg,
                 "year_high": safe(fi.get("yearHigh")),
                 "year_low": safe(fi.get("yearLow")),
@@ -155,19 +168,14 @@ def get_stock(symbol: str, period: str = "3mo"):
                 "earnings_growth": safe(info.get("earningsGrowth")),
                 "dividend_yield": safe(info.get("dividendYield")),
                 "beta": safe(info.get("beta")),
-                "fifty_day_avg": safe(fi.get("fiftyDayAverage")),
-                "two_hundred_day_avg": safe(fi.get("twoHundredDayAverage")),
-                "shares_outstanding": safe(fi.get("shares")),
             },
             "technical": {
-                "rsi_14": rsi,
-                "macd": macd,
-                "bollinger_bands": bb,
-                "ma20": ma20,
-                "ma50": ma50,
-                "ma200": ma200,
-                "resistance_20d": high_20,
-                "support_20d": low_20,
+                "rsi_14": calc_rsi(closes),
+                "macd": calc_macd(closes),
+                "bollinger_bands": calc_bb(closes),
+                "ma20": ma20, "ma50": ma50, "ma200": ma200,
+                "resistance_20d": round(max(hist["High"].tail(20)), 2),
+                "support_20d": round(min(hist["Low"].tail(20)), 2),
                 "price_vs_ma20": "above" if ma20 and cur > ma20 else "below",
                 "price_vs_ma50": "above" if ma50 and cur > ma50 else "below",
                 "price_vs_ma200": "above" if ma200 and cur > ma200 else "below",
